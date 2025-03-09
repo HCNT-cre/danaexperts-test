@@ -98,32 +98,6 @@ Open your browser and navigate to `http://localhost:5173` to access the frontend
 
 ---
 
-## Project Structure
-
-```plaintext
-danaexperts-test/
-├── backend/
-│   ├── main.py
-│   ├── api/
-│   ├── services/
-│   ├── models/
-│   ├── utils/
-│   └── requirements.txt
-├── frontend/
-│   ├── src/
-│   │   ├── components/
-│   │   ├── pages/
-│   │   ├── api/
-│   │   └── App.jsx
-│   ├── package.json
-│   ├── yarn.lock
-│   └── vite.config.js
-├── .gitignore
-└── README.md
-```
-
----
-
 ## How It Works
 
 - **Document Upload:** PDFs are parsed and converted into text using PyPDF.
