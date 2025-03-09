@@ -23,9 +23,10 @@ import { Send, CloudUpload, Person, SmartToy } from "@mui/icons-material";
 function App() {
     const [messages, setMessages] = useState<{ role: string; content: string }[]>([]);
     const [input, setInput] = useState("");
-    const [uploading, setUploading] = useState(false);
+    const [textInput, setTextInput] = useState("");
+    const [uploadingText, setUploadingText] = useState(false);
+    const [uploadingPdf, setUploadingPdf] = useState(false);
     const [loading, setLoading] = useState(false);
-    const [files, setFiles] = useState<File[]>([]);
     const [uploadedFiles, setUploadedFiles] = useState<string[]>([]);
     const [conversationId, setConversationId] = useState<string | null>(null);
     const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: "success" | "error" }>({
@@ -39,10 +40,39 @@ function App() {
         chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [messages]);
 
+    const uploadPdf = async (acceptedFiles: File[]) => {
+        if (!conversationId) {
+            setSnackbar({ open: true, message: "Please start a conversation first!", severity: "error" });
+            return;
+        }
+        setUploadingPdf(true);
+        const formData = new FormData();
+        acceptedFiles.forEach((file) => formData.append("files", file));
+
+        try {
+            const response = await axios.post(
+                `http://localhost:8000/upload?conversation_id=${conversationId}`,
+                formData
+            );
+            console.log("Upload PDF response:", response);
+            if (response.status === 200 && response.data.message) {
+                setSnackbar({ open: true, message: "PDF upload successful!", severity: "success" });
+                setUploadedFiles((prev) => [...prev, ...acceptedFiles.map((file) => file.name)]);
+            } else {
+                setSnackbar({ open: true, message: "PDF upload failed.", severity: "error" });
+            }
+        } catch (error) {
+            console.error("PDF upload failed:", error);
+            setSnackbar({ open: true, message: "PDF upload failed. Please try again.", severity: "error" });
+        } finally {
+            setUploadingPdf(false);
+        }
+    };
+
     const { getRootProps, getInputProps } = useDropzone({
         accept: { "application/pdf": [".pdf"] },
         onDrop: (acceptedFiles) => {
-            setFiles((prevFiles) => [...prevFiles, ...acceptedFiles]);
+            uploadPdf(acceptedFiles);
         },
     });
 
@@ -53,7 +83,7 @@ function App() {
             setConversationId(data.conversation_id);
             setMessages([]);
             setUploadedFiles([]);
-            setFiles([]);
+            setTextInput("");
             setSnackbar({ open: true, message: `New conversation started with ID: ${data.conversation_id}`, severity: "success" });
         } catch (error) {
             console.error("Error starting conversation:", error);
@@ -61,34 +91,37 @@ function App() {
         }
     };
 
-    const uploadFiles = async () => {
+    const uploadText = async () => {
         if (!conversationId) {
             setSnackbar({ open: true, message: "Please start a conversation first!", severity: "error" });
             return;
         }
-        if (files.length === 0) return;
-        setUploading(true);
+        if (!textInput.trim()) return;
+
+        setUploadingText(true);
         const formData = new FormData();
-        files.forEach((file) => formData.append("files", file));
+        formData.append("text", textInput);
 
         try {
             const response = await axios.post(
-                `http://localhost:8000/upload?conversation_id=${conversationId}`,
-                formData
+                `http://localhost:8000/upload_text?conversation_id=${conversationId}`,
+                formData,
+                { headers: { "Content-Type": "multipart/form-data" } }
             );
-            console.log("Upload response:", response);
+            console.log("Upload text response:", response);
             if (response.status === 200 && response.data.message) {
-                setSnackbar({ open: true, message: "Upload successful!", severity: "success" });
-                setUploadedFiles((prev) => [...prev, ...files.map((file) => file.name)]);
-                setFiles([]);
+                setSnackbar({ open: true, message: "Text upload successful!", severity: "success" });
+                setUploadedFiles((prev) => [...prev, "user_input.txt"]);
+                setTextInput("");
             } else {
-                setSnackbar({ open: true, message: "Upload failed. Server did not return a success message.", severity: "error" });
+                setSnackbar({ open: true, message: "Text upload failed.", severity: "error" });
             }
         } catch (error) {
-            console.error("Upload failed:", error);
-            setSnackbar({ open: true, message: "Upload failed. Please try again.", severity: "error" });
+            console.error("Text upload failed:", error);
+            setSnackbar({ open: true, message: "Text upload failed. Please try again.", severity: "error" });
+        } finally {
+            setUploadingText(false);
         }
-        setUploading(false);
     };
 
     const sendMessage = async () => {
@@ -125,6 +158,13 @@ function App() {
         if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
             sendMessage();
+        }
+    };
+
+    const handleTextKeyPress = (event: React.KeyboardEvent) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            uploadText();
         }
     };
 
@@ -177,7 +217,6 @@ function App() {
             </Button>
 
             <Box sx={{ display: "flex", flex: 1, gap: 3, height: "calc(100% - 140px)" }}>
-                {/* Cột danh sách file PDF */}
                 <Paper
                     sx={{
                         width: "25%",
@@ -186,11 +225,60 @@ function App() {
                         borderRadius: "12px",
                         boxShadow: "0 4px 12px rgba(0, 0, 0, 0.2)",
                         overflowY: "auto",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 2,
                     }}
                 >
                     <Typography variant="h6" sx={{ mb: 2, color: "#00e676" }}>
-                        Uploaded PDFs
+                        Input & Uploaded Files
                     </Typography>
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                        <TextField
+                            fullWidth
+                            variant="outlined"
+                            placeholder="Enter text here..."
+                            value={textInput}
+                            onChange={(e) => setTextInput(e.target.value)}
+                            onKeyPress={handleTextKeyPress}
+                            sx={{
+                                bgcolor: "#424242",
+                                borderRadius: "8px",
+                                "& .MuiOutlinedInput-root": {
+                                    color: "white",
+                                    "& fieldset": { borderColor: "#616161" },
+                                    "&:hover fieldset": { borderColor: "#00e676" },
+                                    "&.Mui-focused fieldset": { borderColor: "#00e676" },
+                                },
+                            }}
+                            disabled={!conversationId || uploadingText}
+                        />
+                        <IconButton
+                            color="primary"
+                            onClick={uploadText}
+                            sx={{ bgcolor: "#00e676", "&:hover": { bgcolor: "#00c853" } }}
+                            disabled={!conversationId || uploadingText}
+                        >
+                            {uploadingText ? <CircularProgress size={24} /> : <Send />}
+                        </IconButton>
+                    </Box>
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+                        <Button
+                            {...getRootProps()}
+                            variant="contained"
+                            startIcon={uploadingPdf ? <CircularProgress size={20} /> : <CloudUpload />}
+                            sx={{
+                                bgcolor: "#00e676",
+                                "&:hover": { bgcolor: "#00c853" },
+                                borderRadius: "8px",
+                                textTransform: "none",
+                            }}
+                            disabled={uploadingPdf || !conversationId}
+                        >
+                            <input {...getInputProps()} hidden />
+                            Click to upload PDF
+                        </Button>
+                    </Box>
                     <List>
                         {uploadedFiles.length > 0 ? (
                             uploadedFiles.map((fileName, index) => (
@@ -204,61 +292,7 @@ function App() {
                     </List>
                 </Paper>
 
-                {/* Phần chính: Upload và Chat */}
                 <Box sx={{ flex: 1, display: "flex", flexDirection: "column", gap: 3 }}>
-                    {/* File Upload Section */}
-                    <Paper
-                        {...getRootProps()}
-                        sx={{
-                            p: 3,
-                            textAlign: "center",
-                            cursor: "pointer",
-                            bgcolor: "#2c2c2c",
-                            borderRadius: "12px",
-                            border: "2px dashed #616161",
-                            transition: "all 0.3s",
-                            "&:hover": { borderColor: "#00e676" },
-                        }}
-                    >
-                        <input {...getInputProps()} />
-                        <Typography sx={{ color: "#bdbdbd" }}>
-                            Drag & drop files here, or click to select files
-                        </Typography>
-                    </Paper>
-
-                    {files.length > 0 && (
-                        <Box
-                            sx={{
-                                display: "flex",
-                                justifyContent: "space-between",
-                                alignItems: "center",
-                                p: 2,
-                                bgcolor: "#2c2c2c",
-                                borderRadius: "12px",
-                                boxShadow: "0 4px 12px rgba(0, 0, 0, 0.2)",
-                            }}
-                        >
-                            <Typography sx={{ color: "#bdbdbd" }}>
-                                {files.length} file(s) selected
-                            </Typography>
-                            <Button
-                                variant="contained"
-                                startIcon={<CloudUpload />}
-                                onClick={uploadFiles}
-                                disabled={uploading || !conversationId}
-                                sx={{
-                                    bgcolor: "#00e676",
-                                    "&:hover": { bgcolor: "#00c853" },
-                                    borderRadius: "8px",
-                                    textTransform: "none",
-                                }}
-                            >
-                                {uploading ? <CircularProgress size={20} /> : "Upload"}
-                            </Button>
-                        </Box>
-                    )}
-
-                    {/* Chat Box */}
                     <Paper
                         sx={{
                             flex: 1,
@@ -314,7 +348,6 @@ function App() {
                 </Box>
             </Box>
 
-            {/* Chat Input */}
             <Box sx={{ display: "flex", alignItems: "center", mt: 3 }}>
                 <TextField
                     fullWidth
@@ -349,7 +382,6 @@ function App() {
                 </IconButton>
             </Box>
 
-            {/* Snackbar thông báo */}
             <Snackbar
                 open={snackbar.open}
                 autoHideDuration={3000}
