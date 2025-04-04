@@ -10,8 +10,9 @@ from typing import List
 import uuid
 import shutil
 import logging
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-# Thiết lập logging
+# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -31,13 +32,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Voyage AI client
+# Initialize Voyage AI client (used for both embedding and reranking)
 voyage_client = voyageai.Client()
 
-# Đường dẫn đến file database Milvus
+# Path to Milvus database
 DB_PATH = "./milvus_legal.db"
 
-# Xóa database cũ khi khởi động ứng dụng
+# Delete old database file or directory if exists
 if os.path.exists(DB_PATH):
     if os.path.isfile(DB_PATH):
         os.remove(DB_PATH)
@@ -46,8 +47,17 @@ if os.path.exists(DB_PATH):
         shutil.rmtree(DB_PATH)
         logger.info(f"Deleted old database directory at {DB_PATH}")
 
-# Initialize Milvus client với database mới
+# Initialize Milvus client
 milvus_client = MilvusClient(uri=DB_PATH)
+
+# Function to split text into chunks
+def split_text(text: str, chunk_size=3000, chunk_overlap=300): 
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        length_function=len,
+    )
+    return text_splitter.split_text(text)
 
 # Function to create a new collection for a conversation
 def create_conversation_collection(conversation_id: str):
@@ -56,7 +66,7 @@ def create_conversation_collection(conversation_id: str):
     if milvus_client.has_collection(collection_name):
         milvus_client.drop_collection(collection_name)
         logger.info(f"Dropped existing collection: {collection_name}")
-    embedding_dim = 1024  # voyage-law-2 model uses 1024 dim
+    embedding_dim = 1024  # voyage-law-2 uses 1024 dim
     milvus_client.create_collection(
         collection_name=collection_name,
         dimension=embedding_dim,
@@ -95,7 +105,8 @@ async def upload_files(conversation_id: str, files: List[UploadFile] = File(...)
                 reader = PdfReader(file.file)
                 pages = [page.extract_text() for page in reader.pages if page.extract_text()]
                 for i, page in enumerate(pages):
-                    embedding = embed_text(page)
+                    logger.info(f"Extracted text from {file.filename}, page {i}: {page[:100]}...")
+                    embedding = embed_text(page) 
                     data.append({"id": current_count + len(data), "vector": embedding, "text": page})
             else:
                 return {"error": f"File {file.filename} is not a PDF."}
@@ -120,9 +131,11 @@ async def upload_text(conversation_id: str, text: str = Form(...)):
     current_count = milvus_client.get_collection_stats(collection_name)["row_count"]
 
     try:
-        if text.strip():  # Kiểm tra xem text có nội dung không
-            embedding = embed_text(text)
-            data.append({"id": current_count, "vector": embedding, "text": text})
+        if text.strip():
+            chunks = split_text(text)  # Split text into chunks if it’s long
+            for i, chunk in enumerate(chunks):
+                embedding = embed_text(chunk)
+                data.append({"id": current_count + i, "vector": embedding, "text": chunk})
         else:
             return {"error": "Text content is empty."}
     except Exception as e:
@@ -131,15 +144,20 @@ async def upload_text(conversation_id: str, text: str = Form(...)):
     if data:
         milvus_client.insert(collection_name=collection_name, data=data)
 
-    return {"message": f"Uploaded text to conversation {conversation_id}"}
+    return {"message": f"Uploaded text (split into {len(data)} chunks) to conversation {conversation_id}"}
 
-# Function to rerank retrieved texts based on similarity to query
-def rerank_texts(query: str, retrieved_texts: List[str], top_k: int = 5):
-    query_embedding = embed_text(query)
-    text_embeddings = voyage_client.embed(retrieved_texts, model="voyage-law-2").embeddings
-    similarities = [sum(a * b for a, b in zip(query_embedding, text_emb)) for text_emb in text_embeddings]
-    sorted_pairs = sorted(zip(retrieved_texts, similarities), key=lambda x: x[1], reverse=True)
-    return [pair[0] for pair in sorted_pairs[:top_k]]
+# Function to rerank retrieved texts using Voyage Reranker
+def rerank_texts(query: str, retrieved_texts: List[str], top_k: int = 3):
+    # Call Voyage AI rerank API
+    reranking = voyage_client.rerank(
+        query=query,
+        documents=retrieved_texts,
+        model="rerank-2",  # Use "rerank-2-lite" if latency is a priority
+        top_k=top_k,
+        truncation=True  # Automatically truncate if exceeding token limits
+    )
+    # Return the reranked list of documents
+    return [result.document for result in reranking.results]
 
 # API Chatbot for a specific conversation
 @app.get("/chat")
@@ -150,28 +168,35 @@ async def chat(conversation_id: str, query: str):
     if not milvus_client.has_collection(collection_name):
         return {"error": f"Conversation {conversation_id} does not exist or has no data."}
 
+    # Automatically clarify the query if it’s vague
+    if "tóm tắt văn bản này" in query.lower():
+        query = "Tóm tắt nội dung chính của văn bản"
+
     search_res = milvus_client.search(
         collection_name=collection_name,
         data=[embed_text(query)],
-        limit=4,
+        limit=10,  # Increase limit to retrieve more results
         search_params={"metric_type": "IP", "params": {}},
         output_fields=["text"],
     )
 
     retrieved_texts = [res["entity"]["text"] for res in search_res[0]]
+    logger.info(f"Retrieved {len(retrieved_texts)} texts: {retrieved_texts}")
     if retrieved_texts:
-        retrieved_texts = rerank_texts(query, retrieved_texts, top_k=2)
+        # Use Voyage Reranker instead of CrossEncoder
+        retrieved_texts = rerank_texts(query, retrieved_texts, top_k=3)  # Get top 3 after reranking
     else:
         return {"response": "No relevant context found for your query."}
 
     context = "\n\n".join(retrieved_texts)
+    logger.info(f"Final context for query '{query}': {context[:200]}...")
 
     SYSTEM_PROMPT = """
     You are a highly knowledgeable legal AI assistant. Your task is to provide accurate and concise answers based solely on the provided legal context. Follow these instructions:
     - Answer the user's question directly and precisely, sticking to the information in the context.
     - Do not hallucinate or provide information outside the given context.
     - Format your response in Markdown:
-      - Use **bold** for legal article numbers (e.g., **Điều 630**) and key legal terms.
+      - Use **bold** for legal article numbers and key legal terms.
       - Use numbered lists (1., 2., etc.) or bullet points (- ) for conditions, steps, or items.
       - Add line breaks between sections for readability.
     - If the context does not contain enough information to fully answer the question, state this clearly and suggest how the user can refine their query.
@@ -189,6 +214,8 @@ async def chat(conversation_id: str, query: str):
     client = OpenAI(
         base_url='http://localhost:11434/v1',
         api_key='ollama',
+        timeout=30,  # Increase timeout
+        max_retries=5  # Increase number of retries
     )
 
     try:
@@ -198,13 +225,14 @@ async def chat(conversation_id: str, query: str):
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": USER_PROMPT},
             ],
-            max_tokens=1500,
+            max_tokens=50000,
             temperature=0.5,
         )
 
         answer = response.choices[0].message.content
         return {"response": answer}
     except Exception as e:
+        logger.error(f"Error in chat endpoint: {str(e)}")
         return {"response": f"Error processing the request: {str(e)}"}
 
 # Optional: API to delete a conversation
@@ -216,3 +244,7 @@ async def delete_conversation(conversation_id: str):
         milvus_client.drop_collection(collection_name)
         return {"message": f"Conversation {conversation_id} deleted."}
     return {"error": f"Conversation {conversation_id} does not exist."}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
